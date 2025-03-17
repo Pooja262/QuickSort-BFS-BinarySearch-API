@@ -9,6 +9,12 @@ from rest_framework.generics import ListAPIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.filters import SearchFilter
 from django_filters.rest_framework import DjangoFilterBackend
+from django.http import HttpResponse, JsonResponse
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.decorators import api_view
+import csv
+
 
 # Utility function to log API calls
 def log_algorithm_call(algorithm_name, input_data, output_data):
@@ -24,32 +30,41 @@ class BinarySearchAPIView(APIView):
     def post(self, request):
         try:
             data = request.data
-            arr = sorted(data.get("array", []))  # Ensure the array is sorted
+            arr = data.get("array")
             target = data.get("target")
 
-            if not isinstance(arr, list) or target is None:
-                return Response({"error": "Invalid input"}, status=status.HTTP_400_BAD_REQUEST)
+            if not isinstance(arr, list) or not all(isinstance(i, (int, float)) for i in arr):
+                return Response({"error": "Invalid input. 'array' must be a list of numbers."}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Binary search implementation
-            left, right = 0, len(arr) - 1
-            while left <= right:
-                mid = (left + right) // 2
-                if arr[mid] == target:
-                    result = mid
-                    break
-                elif arr[mid] < target:
-                    left = mid + 1
-                else:
-                    right = mid - 1
-            else:
-                result = -1  # Not found
+            if not isinstance(target, (int, float)):
+                return Response({"error": "Invalid target. Must be a number."}, status=status.HTTP_400_BAD_REQUEST)
 
-            log_algorithm_call("Binary Search", data, {"index": result})
-            return Response({"index": result}, status=status.HTTP_200_OK)
+            # Ensure the array is sorted
+            arr.sort()
+
+            # Perform binary search
+            result = self.binary_search(arr, target)
+
+            # Log the request and response
+            AlgorithmLog.objects.create(algorithm_name="Binary Search", input_data={"array": arr, "target": target}, output_data=result)
+
+            return Response({"result": result}, status=status.HTTP_200_OK)
 
         except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": f"An error occurred: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    def binary_search(self, arr, target):
+        left, right = 0, len(arr) - 1
+        while left <= right:
+            mid = (left + right) // 2
+            if arr[mid] == target:
+                return mid  # Return index if found
+            elif arr[mid] < target:
+                left = mid + 1
+            else:
+                right = mid - 1
+        return -1  # Not found
+    
 
 # Quick Sort API
 class QuickSortAPIView(APIView):
@@ -125,3 +140,45 @@ class AlgorithmLogListAPIView(ListAPIView):
     filter_backends = [DjangoFilterBackend, SearchFilter]
     filterset_fields = ["algorithm_name"]  # Allows filtering by algorithm name
     search_fields = ["algorithm_name"]
+
+
+
+
+class ExportLogsAPIView(APIView):
+    def get(self, request, format=None):
+        try:
+            logs = AlgorithmLog.objects.all().order_by("-timestamp")
+
+            if not logs.exists():
+                return Response({"error": "No logs found."}, status=status.HTTP_404_NOT_FOUND)
+
+            export_format = request.GET.get("format", "json").lower()
+
+            if export_format == "csv":
+                response = HttpResponse(content_type="text/csv")
+                response["Content-Disposition"] = 'attachment; filename="logs.csv"'
+                writer = csv.writer(response)
+                writer.writerow(["Algorithm Name", "Input Data", "Output Data", "Timestamp"])
+
+                for log in logs:
+                    writer.writerow([log.algorithm_name, json.dumps(log.input_data), json.dumps(log.output_data), log.timestamp])
+
+                return response
+
+            elif export_format == "json":
+                log_data = [
+                    {
+                        "algorithm_name": log.algorithm_name,
+                        "input_data": log.input_data,
+                        "output_data": log.output_data,
+                        "timestamp": log.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    for log in logs
+                ]
+                return JsonResponse(log_data, safe=False)
+
+            else:
+                return Response({"error": "Invalid format. Use 'json' or 'csv'."}, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            return Response({"error": f"An unexpected error occurred: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
